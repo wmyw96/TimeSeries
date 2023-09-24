@@ -33,7 +33,7 @@ parser.add_argument("--dropout", type=float, default=0.1)
 
 args = parser.parse_args()
 
-exp_name = f'sigma{args.sigma}_signal{args.signal}_seed{args.seed}_dim{args.dim}_order{args.order}'
+exp_name = f'sigma{args.sigma}_signal{args.signal}_seed{args.seed}_dim{args.dim}_order{args.order}_'
 exp_name += f'T{args.T}_dmodel{args.dmodel}_layer{args.nlayer}_window{args.window}_dropout{args.dropout}_lr{args.lr}_epochs{args.epochs}'
 
 start_time = time.time()
@@ -52,7 +52,7 @@ def autoregressive_model(T, order, coeff=None, sigma=0.5, signal=0.3):
 
 
 np.random.seed(args.seed)
-T = args.T
+T = args.T * 3
 order = args.order
 x_array = []
 oracle_loss = 0
@@ -61,11 +61,13 @@ for k in range(args.dim):
 	oracle_loss += np.mean(np.square(x_k - _)) / args.dim
 	x_array.append(x_k)
 x = np.transpose(np.array(x_array))
+print(f'Case {exp_name}')
 print(f'x: std = {np.std(x)}, range = ({np.min(x)}, {np.max(x)}), shape={np.shape(x)}')
 print(f'x: null = {np.std(x)**2}, oracle={oracle_loss}')
-split_time = T // 2
+split_time = T // 3
 x_train = x[: split_time, :]
-x_valid = x[split_time: , :]
+x_valid = x[split_time: split_time * 2, :]
+x_test = x[split_time*2:, :]
 
 window_size = args.window
 batch_size = 30
@@ -78,11 +80,11 @@ def create_dataset(series, window_size):
 		Y.append(series[i+window_size, :])
 	X = np.array(X)
 	Y = np.array(Y)
-	print(f'create dataset: X shape = {np.shape(X)}, Y shape = {np.shape(Y)}')
 	return torch.tensor(X).float(), torch.tensor(Y).float()
 
 train_data, train_labels = create_dataset(x_train, window_size)
 valid_data, valid_labels = create_dataset(x_valid, window_size)
+test_data, test_labels = create_dataset(x_test, window_size)
 
 train_dataset = torch.utils.data.TensorDataset(train_data, train_labels)
 train_loader = torch.utils.data.DataLoader(train_dataset, shuffle=True, batch_size=batch_size)
@@ -143,14 +145,18 @@ optimizer = optim.Adam(model.parameters(), lr=args.lr)#, betas = (0.9, 0.98), ep
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs+1)
 total_params = sum(p.numel() for p in model.parameters())
 
-print(total_params)
+print(f'number of paras = {total_params}')
 image_paths = []
 
 if args.gvideo:
 	if not os.path.exists("predictions_images"):
 		os.makedirs("predictions_images")
 
-errors = np.ones((epochs, 2)) * 1e-5
+errors = np.ones((epochs, 3))
+errors[:, 0] *= 1e-5
+errors[:, 1] *= 10
+errors[:, 2] *= 10
+
 for epoch in range(epochs):
 	model.train()
 	train_losses = []
@@ -164,13 +170,15 @@ for epoch in range(epochs):
 	
 	with torch.no_grad():
 		valid_output = model(valid_data)
+		test_output = model(test_data)
 		valid_loss = criterion(valid_output, valid_labels)
+		test_loss = criterion(test_output, test_labels)
 
-	errors[epoch, 0], errors[epoch, 1] = np.mean(train_losses), valid_loss.item()
-	if errors[epoch, 0] < 1e-5:
-		break
+	errors[epoch, 0], errors[epoch, 1], errors[epoch, 2] = np.mean(train_losses), valid_loss.item(), test_loss.item()
+	#if errors[epoch, 0] < 1e-5:
+	#	break
 	#if epoch % 10 == 0:
-	print(f'train loss = {errors[epoch, 0]}, valid loss = {errors[epoch, 1]}')
+	#print(f'epoch = {epoch}: train loss = {errors[epoch, 0]}, valid loss = {errors[epoch, 1]}')
 
 	if args.gvideo:
 		# plot predictions
@@ -181,18 +189,25 @@ for epoch in range(epochs):
 
 		plt.figure(figsize=(14, 7))
 
+		pred = valid_predictions.numpy()[:, 0]
+		regressor = valid_data[:, -1, 0]
+		plt.scatter(regressor, pred)
+		# y = 0.95 x
+		plt.title(f'epoch = {epoch}, test loss = {valid_loss.item()}')
+		'''
 		# Plot actual series
-		plt.plot(np.arange(split_time), x_train, label="Actual Training")
-		plt.plot(np.arange(split_time, len(x)), x_valid, label="Actual Validation")
+		plt.plot(np.arange(split_time), x_train[:, 0], label="Actual Training")
+		plt.plot(np.arange(split_time, len(x)), x_valid[:, 0], label="Actual Validation")
 		# Plot predicted series
-		plt.plot(np.arange(window_size, split_time), train_predictions.numpy(), label="Training Predictions")
-		plt.plot(np.arange(split_time + window_size, len(x)), valid_predictions.numpy(), label="Validation Predictions")
+		plt.plot(np.arange(window_size, split_time), train_predictions.numpy()[:, 0], label="Training Predictions")
+		plt.plot(np.arange(split_time + window_size, len(x)), valid_predictions.numpy()[:, 0], label="Validation Predictions")
 
-		plt.title("Model Predictions on Training and Validation Sets: Epoch {}".format(epoch + 1))
+		#plt.title("Model Predictions on Training and Validation Sets: Epoch {}".format(epoch + 1))
 		plt.xlabel("Time")
 		plt.ylabel("Value")
 		plt.legend()
 		plt.grid(True)
+		'''
 		image_path = os.path.join("predictions_images", f"epoch_{epoch + 1}_predictions.png")
 		plt.savefig(image_path)
 		image_paths.append(image_path)
@@ -201,7 +216,7 @@ for epoch in range(epochs):
 
 if len(args.record_dir) > 0:
 	save_path = os.path.join(args.record_dir, exp_name + '.csv')
-	np.savetxt(save_path, errors, delimiter=",")
+	np.savetxt(save_path, errors[:epoch+1,:], delimiter=",")
 
 if args.gvideo:
 	video_path = "training_predictions_evolution.mp4"
@@ -210,4 +225,4 @@ if args.gvideo:
 		os.remove(image_path)
 
 end_time = time.time()
-print(f"Case {exp_name} done: time = {end_time - start_time} secs")
+print(f"Done: time = {end_time - start_time} secs\n\n")
